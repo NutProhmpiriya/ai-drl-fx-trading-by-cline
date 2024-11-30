@@ -20,11 +20,11 @@ class ForexTradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
         
         # Define observation space
-        # [balance, position, ema_fast, ema_slow, daily_pnl]
+        # [balance, position, ema_fast, ema_slow, daily_pnl, spread]
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(5,), 
+            shape=(6,), 
             dtype=np.float32
         )
 
@@ -43,13 +43,15 @@ class ForexTradingEnv(gym.Env):
     def get_observation(self) -> np.ndarray:
         """Get current state observation"""
         ema_fast, ema_slow = self.calculate_ema_signals()
+        current_spread = self.df.iloc[self.current_step]['spread']
         
         obs = np.array([
             self.balance,
             self.position,
             ema_fast,
             ema_slow,
-            self.daily_pnl
+            self.daily_pnl,
+            current_spread
         ], dtype=np.float32)
         
         return obs
@@ -61,6 +63,7 @@ class ForexTradingEnv(gym.Env):
         
         current_price = self.df.iloc[self.current_step]['close']
         current_date = self.df.iloc[self.current_step].name.date()
+        current_spread = self.df.iloc[self.current_step]['spread']
         
         # Reset daily PnL on new day
         if self.last_trade_day is None:
@@ -75,21 +78,31 @@ class ForexTradingEnv(gym.Env):
         # Execute trading action
         if action == 1:  # Buy
             if self.position <= 0:
-                if self.position < 0:
-                    reward += self.position * (self.previous_price - current_price)
+                if self.position < 0:  # Close sell position
+                    # Include spread cost for closing sell position
+                    reward += self.position * (self.previous_price - (current_price + current_spread/2))
+                # Open buy position with spread cost
                 self.position = position_size
-                self.previous_price = current_price
+                self.previous_price = current_price + current_spread/2
+                reward -= abs(self.position) * current_spread  # Cost of opening position
                 
         elif action == 2:  # Sell
             if self.position >= 0:
-                if self.position > 0:
-                    reward += self.position * (current_price - self.previous_price)
+                if self.position > 0:  # Close buy position
+                    # Include spread cost for closing buy position
+                    reward += self.position * ((current_price - current_spread/2) - self.previous_price)
+                # Open sell position with spread cost
                 self.position = -position_size
-                self.previous_price = current_price
+                self.previous_price = current_price - current_spread/2
+                reward -= abs(self.position) * current_spread  # Cost of opening position
                 
-        # Calculate PnL
+        # Calculate PnL including spread
         if self.position != 0:
-            trade_pnl = self.position * (current_price - self.previous_price)
+            if self.position > 0:  # Long position
+                trade_pnl = self.position * ((current_price - current_spread/2) - self.previous_price)
+            else:  # Short position
+                trade_pnl = self.position * (self.previous_price - (current_price + current_spread/2))
+            
             reward += trade_pnl
             self.daily_pnl += trade_pnl
             self.balance += trade_pnl
@@ -107,7 +120,8 @@ class ForexTradingEnv(gym.Env):
         info = {
             'balance': self.balance,
             'daily_pnl': self.daily_pnl,
-            'position': self.position
+            'position': self.position,
+            'spread': current_spread
         }
         
         return self.get_observation(), reward, done, False, info
